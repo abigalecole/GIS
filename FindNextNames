@@ -1,0 +1,90 @@
+import arcpy
+import re
+import os
+def main():
+    # Toolbox parameters
+    struct_fc = arcpy.GetParameterAsText(0)  # Structures feature class
+    span_fc   = arcpy.GetParameterAsText(1)  # Span feature class
+    zone_fc   = arcpy.GetParameterAsText(2)  # Zone feature class
+    out_table = arcpy.GetParameterAsText(3)  # Output table
+    # Regex for structure IDs (7-digit numbers)
+    struct_pattern = re.compile(r"^(BP|HH|DP|V)\.([A-Z0-9]+)\.(\d{7})$")
+    # Regex for span IDs (any number of digits, text field)
+    span_pattern = re.compile(r"^(\d+)$")
+    max_by_type = {"BP": 0, "HH": 0, "DP": 0, "V": 0}
+    max_span = 0
+    # Create temporary layers
+    struct_lyr = "struct_lyr_temp"
+    span_lyr = "span_lyr_temp"
+    zone_lyr = "zone_lyr_temp"
+    arcpy.MakeFeatureLayer_management(struct_fc, struct_lyr)
+    arcpy.MakeFeatureLayer_management(span_fc, span_lyr)
+    arcpy.MakeFeatureLayer_management(zone_fc, zone_lyr)
+    # Select features that intersect the zone
+    arcpy.SelectLayerByLocation_management(struct_lyr, "INTERSECT", zone_lyr)
+    arcpy.SelectLayerByLocation_management(span_lyr, "INTERSECT", zone_lyr)
+    # Get zone name
+    zone_name = None
+    with arcpy.da.SearchCursor(zone_lyr, ["Zone"]) as z_cursor:
+        for zrow in z_cursor:
+            zone_name = zrow[0]
+            break
+    if not zone_name:
+        arcpy.AddError("No zone found in the selected zone layer.")
+        return
+    # Process structures
+    with arcpy.da.SearchCursor(struct_lyr, ["STRUCTURE_ID"]) as cursor:
+        for row in cursor:
+            structure_id = row[0]
+            if not structure_id:
+                continue
+            match = struct_pattern.match(structure_id)
+            if not match:
+                continue
+            prefix, _, number_str = match.groups()
+            number = int(number_str)
+            max_by_type[prefix] = max(max_by_type[prefix], number)
+    # Process spans
+    with arcpy.da.SearchCursor(span_lyr, ["SPAN_ID"]) as cursor:
+        for row in cursor:
+            span_id = row[0]
+            if not span_id:
+                continue
+            match = span_pattern.match(span_id)
+            if not match:
+                continue
+            number = int(match.group(1))
+            max_span = max(max_span, number)
+    # Build next names
+    next_by_type = {
+        "BP": f"BP.{zone_name}.{str(max_by_type['BP'] + 1).zfill(7)}",
+        "HH": f"HH.{zone_name}.{str(max_by_type['HH'] + 1).zfill(7)}",
+        "DP": f"DP.{zone_name}.{str(max_by_type['DP'] + 1).zfill(7)}",
+        "V":  f"V.{zone_name}.{str(max_by_type['V'] + 1).zfill(7)}",
+    }
+    # Next span ID fixed at 5 digits
+    next_span = str(max_span + 1).zfill(5)
+    # Delete output table if it exists
+    if arcpy.Exists(out_table):
+        arcpy.Delete_management(out_table)
+    # Create output table
+    arcpy.CreateTable_management(*os.path.split(out_table))
+    arcpy.AddField_management(out_table, "FeatureType", "TEXT", field_length=30)
+    arcpy.AddField_management(out_table, "NextAvailableName", "TEXT", field_length=50)
+    # Insert results
+    with arcpy.da.InsertCursor(out_table, ["FeatureType", "NextAvailableName"]) as icur:
+        icur.insertRow(["Bore Pit", next_by_type["BP"]])
+        icur.insertRow(["Handhole", next_by_type["HH"]])
+        icur.insertRow(["Flowerpot", next_by_type["DP"]])
+        icur.insertRow(["Cabinet", next_by_type["V"]])
+        icur.insertRow(["Span", next_span])
+    # Report summary
+    arcpy.AddMessage(f"Next available numbers for zone {zone_name}:")
+    arcpy.AddMessage(f"  Bore Pit:    {next_by_type['BP']}")
+    arcpy.AddMessage(f"  Handhole:    {next_by_type['HH']}")
+    arcpy.AddMessage(f"  Flowerpot:   {next_by_type['DP']}")
+    arcpy.AddMessage(f"  Cabinet:     {next_by_type['V']}")
+    arcpy.AddMessage(f"  Span:        {next_span}")
+    arcpy.AddMessage(f"Results also written to table: {out_table}")
+if __name__ == "__main__":
+    main()
