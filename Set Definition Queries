@@ -1,0 +1,96 @@
+import arcpy
+
+aprx = arcpy.mp.ArcGISProject("CURRENT")
+
+# Maps to apply definition queries to
+target_maps = ["Detailed Map", "Grid Map", "Location Overview Map"]
+
+# All 8 layers in the Permit Boundaries group
+permit_layers = [
+    "City",
+    "Primary Aerial",
+    "Third Party Aerial",
+    "County",
+    "DOT",
+    "RR",
+    "DNR",
+    "Other"
+]
+
+# User-selected layer and value
+selected_layer_name_raw = arcpy.GetParameterAsText(0)
+selected_value = arcpy.GetParameterAsText(1)
+
+# Extract just the layer name from the full path (e.g., "Permit Boundaries\City" -> "City")
+if '\\' in selected_layer_name_raw:
+    selected_layer_name = selected_layer_name_raw.split('\\')[-1]
+else:
+    selected_layer_name = selected_layer_name_raw
+
+# FDA layer & value
+fda_layer = arcpy.GetParameter(2)
+fda_value = arcpy.GetParameterAsText(3)
+
+# Zone layer & value
+zone_layer = arcpy.GetParameter(4)
+zone_value = arcpy.GetParameterAsText(5)
+
+# Function to find layer in map (handles nested group layers)
+def find_layer_in_map(map_obj, layer_name):
+    """Recursively search for a layer in a map, including within nested group layers"""
+    def search_layers(layer_list):
+        for lyr in layer_list:
+            if lyr.name == layer_name and lyr.isFeatureLayer:
+                return lyr
+            elif lyr.isGroupLayer:
+                found = search_layers(lyr.listLayers())
+                if found:
+                    return found
+        return None
+    return search_layers(map_obj.listLayers())
+
+# Apply definition queries
+for map_name in target_maps:
+    try:
+        target_map = aprx.listMaps(map_name)[0]
+        arcpy.AddMessage(f"Processing map: {map_name}")
+        
+        # Process permit boundary layers
+        for lyr_name in permit_layers:
+            layer = find_layer_in_map(target_map, lyr_name)
+            if layer:
+                if lyr_name.strip().lower() == selected_layer_name.strip().lower():
+                    layer.definitionQuery = f'"Name" = \'{selected_value}\''
+                    arcpy.AddMessage(f"  Applied selected query to {lyr_name}")
+                else:
+                    layer.definitionQuery = "ObjectID = -1"
+                    arcpy.AddMessage(f"  Applied hide query to {lyr_name}")
+            else:
+                arcpy.AddWarning(f"  Could not find layer '{lyr_name}' in map {map_name}")
+        
+        # Process FDA layer
+        if fda_layer and fda_layer.isFeatureLayer:
+            fda_layer_obj = find_layer_in_map(target_map, fda_layer.name)
+            if fda_layer_obj:
+                fda_layer_obj.definitionQuery = f'"FDA_ID" = \'{fda_value}\''
+                arcpy.AddMessage("  Applied FDA definition query")
+            else:
+                arcpy.AddWarning(f"  Could not find FDA layer '{fda_layer.name}' in map {map_name}")
+        else:
+            arcpy.AddWarning("  FDA layer parameter is invalid or not a feature layer")
+        
+        # Process Zone layer
+        if zone_layer and zone_layer.isFeatureLayer:
+            zone_layer_obj = find_layer_in_map(target_map, zone_layer.name)
+            if zone_layer_obj:
+                zone_layer_obj.definitionQuery = f'"Zone" = \'{zone_value}\''
+                arcpy.AddMessage("  Applied Zone definition query")
+            else:
+                arcpy.AddWarning(f"  Could not find Zone layer '{zone_layer.name}' in map {map_name}")
+        else:
+            arcpy.AddWarning("  Zone layer parameter is invalid or not a feature layer")
+            
+    except Exception as e:
+        arcpy.AddError(f"  Error processing map {map_name}: {str(e)}")
+
+arcpy.AddMessage("Process Complete")
