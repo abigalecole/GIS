@@ -1,0 +1,302 @@
+# Tool: Create SpliceLabel Feature Class
+import arcpy
+import os
+def concat_unique(values):
+    seen = set()
+    result = []
+    for v in values:
+        if v is None:
+            continue
+        v = str(v)
+        if v not in seen:
+            seen.add(v)
+            result.append(v)
+    return ", ".join(result)
+def main():
+    addr_fc = arcpy.GetParameterAsText(0)
+    struct_fc = arcpy.GetParameterAsText(1)
+    splice_fc = arcpy.GetParameterAsText(2)
+    term_fc = arcpy.GetParameterAsText(3)
+    equip_fc = arcpy.GetParameterAsText(4)
+    out_fc = arcpy.GetParameterAsText(5)
+    
+    arcpy.env.overwriteOutput = True
+    out_path, out_name = os.path.split(out_fc)
+    
+    # Map subtype codes to field names
+    subtype_names = {
+        2: "Splitter_1_2",
+        4: "Splitter_1_4",
+        8: "Splitter_1_8",
+        23: "Patch_Panel",
+        123: "MST_1_4",
+        456: "MST_1_8",
+        32: "Splitter_1_32",
+        50: "Terminal_8_Port",
+        51: "Terminal_4_Port"
+    }
+    
+    # Always include all equipment fields, even if not present
+    equip_types = sorted(subtype_names.keys())
+    
+    if arcpy.Exists(out_fc):
+        arcpy.Delete_management(out_fc)
+    
+    arcpy.CreateFeatureclass_management(out_path, out_name, "POINT", spatial_reference=term_fc)
+    
+    # Define fields
+    fields = [
+        ("BoundaryID", "GUID"),
+        ("StructureID", "TEXT"),
+        ("SizeSummary", "TEXT"),
+        ("TerminatingFiber_Splice", "TEXT"),
+        ("TerminatingFiber_Equip", "TEXT"),
+        ("HO_1_Splice", "TEXT"),
+        ("HO_1_Equip", "TEXT"),
+        ("Addresses", "TEXT")
+    ]
+    
+    # Add equipment fields
+    for subtype in equip_types:
+        fields.append((subtype_names[subtype], "LONG"))
+    
+    for name, ftype in fields:
+        arcpy.AddField_management(out_fc, name, ftype)
+    
+    insert_fields = ["SHAPE@"] + [f[0] for f in fields]
+    inserter = arcpy.da.InsertCursor(out_fc, insert_fields)
+    
+    splice_lyr = arcpy.MakeFeatureLayer_management(splice_fc, "splice_lyr")
+    struct_lyr = arcpy.MakeFeatureLayer_management(struct_fc, "struct_lyr")
+    addr_lyr = arcpy.MakeFeatureLayer_management(addr_fc, "addr_lyr")
+    equip_lyr = arcpy.MakeFeatureLayer_management(equip_fc, "equip_lyr")
+    
+    arcpy.AddMessage("Processing handholes inside terminal boundaries...")
+    
+    with arcpy.da.SearchCursor(term_fc, ["SHAPE@", "GlobalID"]) as term_cursor:
+        for term_geom, gid in term_cursor:
+            arcpy.SelectLayerByLocation_management(splice_lyr, "INTERSECT", term_geom)
+            splice_count = int(arcpy.GetCount_management(splice_lyr)[0])
+            arcpy.AddMessage(f"Terminal {gid}: Found {splice_count} intersecting splices")
+            
+            size_vals = []
+            splice_tf = []
+            splice_ho1 = []
+            equip_tf = []
+            equip_ho1 = []
+            equip_totals = {st: None for st in equip_types}  # blank if no equipment
+            
+            splice_oids = [row[0] for row in arcpy.da.SearchCursor(splice_lyr, ["OID@"])]
+            
+            # Process splices for size and fiber info
+            with arcpy.da.SearchCursor(
+                splice_fc, ["OID@", "SHAPE@", "Size", "TerminatingFiber", "TOTAL_HO_1"]
+            ) as scur:
+                for oid, splice_geom, size, tf, ho1 in scur:
+                    if oid not in splice_oids:
+                        continue
+                    if size:
+                        size_vals.append(size)
+                    if tf:
+                        splice_tf.append(tf)
+                    if ho1:
+                        splice_ho1.append(ho1)
+            
+            # FIX: Search for ALL equipment within the terminal boundary
+            arcpy.SelectLayerByLocation_management(equip_lyr, "INTERSECT", term_geom)
+            equip_count = int(arcpy.GetCount_management(equip_lyr)[0])
+            arcpy.AddMessage(f"Terminal {gid}: Found {equip_count} equipment items in boundary")
+            
+            with arcpy.da.SearchCursor(equip_lyr, ["SUBTYPE_CODE", "TerminatingFiber", "HO_1"]) as ecur:
+                for subtype, etf, eho in ecur:
+                    if subtype in equip_totals:
+                        if equip_totals[subtype] is None:
+                            equip_totals[subtype] = 1
+                        else:
+                            equip_totals[subtype] += 1
+                    if etf:
+                        equip_tf.append(etf)
+                    if eho:
+                        equip_ho1.append(eho)
+            
+            size_summary = ""
+            if size_vals:
+                counts = {}
+                for s in size_vals:
+                    counts[s] = counts.get(s, 0) + 1
+                size_summary = ", ".join([f"{k} ({v})" if v>1 else k for k, v in counts.items()])
+            
+            struct_id = None
+            struct_shape = None
+            arcpy.SelectLayerByLocation_management(struct_lyr, "INTERSECT", term_geom)
+            struct_count = int(arcpy.GetCount_management(struct_lyr)[0])
+            arcpy.AddMessage(f"Terminal {gid}: Found {struct_count} intersecting structures")
+            
+            struct_oids = []
+            with arcpy.da.SearchCursor(struct_lyr, ["OID@", "Structure_Type"]) as temp_cur:
+                for oid, stype in temp_cur:
+                    if stype and stype == "Handhole":
+                        struct_oids.append(oid)
+            
+            if struct_oids:
+                with arcpy.da.SearchCursor(struct_fc, ["OID@", "SHAPE@", "Structure_ID"]) as sCur:
+                    for oid, sGeom, sid in sCur:
+                        if oid in struct_oids:
+                            struct_id = sid
+                            struct_shape = sGeom
+                            break
+            
+            if not struct_id and size_vals:
+                arcpy.SelectLayerByLocation_management(splice_lyr, "INTERSECT", term_geom)
+                for sp_geom, in arcpy.da.SearchCursor(splice_lyr, ["SHAPE@"]):
+                    arcpy.SelectLayerByLocation_management(struct_lyr, "INTERSECT", sp_geom)
+                    with arcpy.da.SearchCursor(struct_lyr, ["SHAPE@", "Structure_ID"]) as s2:
+                        for sGeom, sid in s2:
+                            struct_id = sid
+                            struct_shape = sGeom
+                            break
+                    if struct_id:
+                        break
+            
+            addr_list = []
+            total_customers = 0
+            addr_fields = ["ParsedRange","ParsedPreDir","ParsedName","ParsedSuffix","Count_ParsedSuiteRange"]
+            arcpy.SelectLayerByLocation_management(addr_lyr, "INTERSECT", term_geom)
+            
+            with arcpy.da.SearchCursor(addr_lyr, addr_fields) as acur:
+                for prange, pdir, pname, psuffix, suite_count in acur:
+                    if prange and pname:
+                        parts = [str(prange)]
+                        if pdir:
+                            parts.append(pdir)
+                        parts.append(pname)
+                        if psuffix:
+                            parts.append(psuffix)
+                        addr_text = " ".join(parts)
+                        count = suite_count if suite_count and suite_count > 1 else 1
+                        total_customers += count
+                        if suite_count and suite_count > 1:
+                            addr_text += f" ({suite_count})"
+                        addr_list.append(addr_text)
+            
+            unique_addrs = sorted(set(addr_list))
+            addresses_text = f"Serves ({total_customers}) Customers\n" + "\n".join(unique_addrs)
+            
+            if struct_shape:
+                equip_values = [equip_totals[st] for st in equip_types]
+                inserter.insertRow([
+                    struct_shape,
+                    gid,
+                    struct_id,
+                    size_summary,
+                    concat_unique(splice_tf),
+                    concat_unique(equip_tf),
+                    concat_unique(splice_ho1),
+                    concat_unique(equip_ho1),
+                    addresses_text,
+                    *equip_values
+                ])
+                arcpy.AddMessage(f"Inserted label for terminal {gid} with handhole {struct_id}")
+            else:
+                arcpy.AddMessage(f"WARNING: No handhole found for terminal {gid} with {splice_count} splices")
+    
+    arcpy.AddMessage("Processing handholes outside terminal boundaries...")
+    
+    existing_ids = {row[0] for row in arcpy.da.SearchCursor(out_fc, ["StructureID"]) if row[0]}
+    arcpy.AddMessage(f"Found {len(existing_ids)} handholes already processed inside terminals")
+    
+    term_geoms = [g for g, in arcpy.da.SearchCursor(term_fc, ["SHAPE@"])]
+    arcpy.AddMessage(f"Loaded {len(term_geoms)} terminal geometries for exclusion check")
+    
+    handhole_check_lyr = arcpy.MakeFeatureLayer_management(struct_fc, "handhole_check", "Structure_Type = 'Handhole'")
+    handhole_data = {}
+    
+    with arcpy.da.SearchCursor(handhole_check_lyr, ["Structure_ID", "SHAPE@"]) as hh_cur:
+        for sid, hh_geom in hh_cur:
+            if sid in existing_ids:
+                continue
+            
+            inside_terminal = any(hh_geom.within(tg) or tg.contains(hh_geom) for tg in term_geoms)
+            if inside_terminal:
+                continue
+            
+            arcpy.SelectLayerByLocation_management(splice_lyr, "WITHIN_A_DISTANCE", hh_geom, "3 Feet")
+            splice_count = int(arcpy.GetCount_management(splice_lyr)[0])
+            
+            if splice_count == 0:
+                continue
+            
+            handhole_data[sid] = {
+                "SplitterCounts": {st: None for st in equip_types},
+                "Sizes": [],
+                "Shape": hh_geom,
+                "TerminatingFiber_Equip": [],
+                "TerminatingFiber_Splice": [],
+                "HO_1_Equip": [],
+                "HO_1_Splice": []
+            }
+            
+            splice_oids = [row[0] for row in arcpy.da.SearchCursor(splice_lyr, ["OID@"])]
+            
+            with arcpy.da.SearchCursor(splice_fc, ["OID@", "SHAPE@", "Size", "TerminatingFiber", "TOTAL_HO_1"]) as sp_cur:
+                for oid, splice_geom, size, tf, ho1 in sp_cur:
+                    if oid not in splice_oids:
+                        continue
+                    if size:
+                        handhole_data[sid]["Sizes"].append(size)
+                    if tf:
+                        handhole_data[sid]["TerminatingFiber_Splice"].append(tf)
+                    if ho1:
+                        handhole_data[sid]["HO_1_Splice"].append(ho1)
+                    
+                    arcpy.SelectLayerByLocation_management(equip_lyr, "WITHIN_A_DISTANCE", splice_geom, "3 Feet")
+                    with arcpy.da.SearchCursor(equip_lyr, ["SUBTYPE_CODE","TerminatingFiber","HO_1"]) as ecur:
+                        for subtype, etf, eho in ecur:
+                            if subtype in handhole_data[sid]["SplitterCounts"]:
+                                if handhole_data[sid]["SplitterCounts"][subtype] is None:
+                                    handhole_data[sid]["SplitterCounts"][subtype] = 1
+                                else:
+                                    handhole_data[sid]["SplitterCounts"][subtype] += 1
+                            if etf:
+                                handhole_data[sid]["TerminatingFiber_Equip"].append(etf)
+                            if eho:
+                                handhole_data[sid]["HO_1_Equip"].append(eho)
+            
+            arcpy.AddMessage(f"Found handhole {sid} outside terminals with {splice_count} intersecting splices")
+    
+    arcpy.AddMessage(f"Total handholes outside terminals intersecting splices: {len(handhole_data)}")
+    
+    inserted_count = 0
+    for sid, info in handhole_data.items():
+        if not info["Sizes"] and not any(info["SplitterCounts"].values()):
+            continue
+        
+        counts = {}
+        for s in info["Sizes"]:
+            counts[s] = counts.get(s,0)+1
+        size_summary = ", ".join([f"{k} ({v})" if v>1 else k for k,v in counts.items()])
+        
+        equip_values = [info["SplitterCounts"][st] for st in equip_types]
+        
+        inserter.insertRow([
+            info["Shape"],
+            None,
+            sid,
+            size_summary,
+            concat_unique(info["TerminatingFiber_Splice"]),
+            concat_unique(info["TerminatingFiber_Equip"]),
+            concat_unique(info["HO_1_Splice"]),
+            concat_unique(info["HO_1_Equip"]),
+            None,
+            *equip_values
+        ])
+        inserted_count += 1
+        arcpy.AddMessage(f"Inserted label for handhole {sid} outside terminals")
+    
+    arcpy.AddMessage(f"Total labels inserted for handholes outside terminals: {inserted_count}")
+    
+    del inserter
+    arcpy.SetParameter(5, out_fc)
+    arcpy.AddMessage("SpliceLabel feature class created successfully")
+if __name__ == "__main__":
+    main()
