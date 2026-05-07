@@ -6,7 +6,7 @@ A collection of Python scripts built with **ArcPy** for automating GIS workflows
 
 ## Scripts
 
-### 1. `FindNextNames.py` — Next Available Feature ID Generator
+### 1. FindNextNames — Next Available Feature ID Generator
 
 Scans existing features within a selected zone and determines the next available ID for each structure type and span.
 
@@ -22,7 +22,7 @@ Scans existing features within a selected zone and determines the next available
 
 ---
 
-### 2. `Label Creation.py` — Splice Label Feature Class Creator
+### 2. Label Creation — Splice Label Feature Class Creator
 
 Generates a point feature class of splice label locations for handholes, enriched with equipment counts, fiber data, and address information.
 
@@ -39,7 +39,7 @@ Generates a point feature class of splice label locations for handholes, enriche
 
 ---
 
-### 3. `Set Definition Query.py` — Multi-Map Definition Query Setter
+### 3. Set Definition Query — Multi-Map Definition Query Setter
 
 Applies definition queries across multiple maps in an ArcGIS Pro project simultaneously, filtering permit boundary layers, FDA zones, and build zones to a selected area of interest.
 
